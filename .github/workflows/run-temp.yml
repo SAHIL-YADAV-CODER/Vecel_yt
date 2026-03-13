@@ -1,0 +1,104 @@
+name: 🚀 Run YT Vault (Temporary Public URL)
+
+on:
+  # Manually trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'How long to keep alive (minutes, max 360)'
+        required: true
+        default: '30'
+
+jobs:
+  serve:
+    name: Run Flask + Expose via ngrok
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # GitHub's max — your input controls actual uptime
+
+    steps:
+      # ── 1. Checkout your repo ──────────────────────────────────────────────
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install FFmpeg (needed by yt-dlp to merge video+audio) ──────────
+      - name: 🎞 Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      # ── 4. Install Python dependencies ────────────────────────────────────
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 5. Install ngrok ──────────────────────────────────────────────────
+      - name: 🌐 Install ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update && sudo apt-get install -y ngrok
+
+      # ── 6. Authenticate ngrok (free account token from repo secret) ────────
+      - name: 🔑 Authenticate ngrok
+        run: ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+
+      # ── 7. Start Flask in background ──────────────────────────────────────
+      - name: ▶️ Start Flask app
+        run: |
+          mkdir -p downloads
+          nohup python app.py > flask.log 2>&1 &
+          echo "Flask PID: $!"
+          sleep 3   # give Flask a moment to boot
+
+      # ── 8. Start ngrok tunnel & print the public URL ──────────────────────
+      - name: 🔗 Start ngrok tunnel
+        run: |
+          nohup ngrok http 5000 --log=stdout > ngrok.log 2>&1 &
+          sleep 5
+
+          # Extract public URL from ngrok's local API
+          PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🌍  PUBLIC URL: $PUBLIC_URL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Open the link above in your browser."
+          echo "  It will stay alive for ${{ github.event.inputs.duration }} minutes."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Also write it to GitHub step summary
+          echo "## 🌍 Your YT Vault is Live!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Public URL:** [$PUBLIC_URL]($PUBLIC_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Stays alive for **${{ github.event.inputs.duration }} minutes**" >> $GITHUB_STEP_SUMMARY
+
+      # ── 9. Keep alive for the requested duration ───────────────────────────
+      - name: ⏳ Keep server alive
+        run: |
+          MINUTES=${{ github.event.inputs.duration }}
+          SECONDS_TOTAL=$(( MINUTES * 60 ))
+          ELAPSED=0
+          INTERVAL=60
+
+          while [ $ELAPSED -lt $SECONDS_TOTAL ]; do
+            REMAINING=$(( (SECONDS_TOTAL - ELAPSED) / 60 ))
+            echo "⏱  Still running — ${REMAINING}m remaining | Flask log tail:"
+            tail -3 flask.log || true
+            sleep $INTERVAL
+            ELAPSED=$(( ELAPSED + INTERVAL ))
+          done
+
+          echo "⏹  Time's up — shutting down."
+
+      # ── 10. Print Flask logs on exit ──────────────────────────────────────
+      - name: 📋 Show Flask logs
+        if: always()
+        run: cat flask.log || echo "(no log)"
